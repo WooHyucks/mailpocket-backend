@@ -1,0 +1,33 @@
+{
+  "name": "mailpocket-node",
+  "version": "1.0.0",
+  "description": "MailPocket Node.js Express Backend",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "start": "node main.js",
+    "dev": "node --watch main.js",
+    "pm2:start": "pm2 start main.js --name mailpocket-backend",
+    "pm2:stop": "pm2 stop mailpocket-backend",
+    "pm2:restart": "pm2 restart mailpocket-backend"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.490.0",
+    "@supabase/supabase-js": "^2.81.0",
+    "axios": "^1.6.2",
+    "bcrypt": "^5.1.1",
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "mailparser": "^3.6.5",
+    "mysql2": "^3.6.5",
+    "openai": "^4.20.1",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1"
+  }
+}
