@@ -5,11 +5,11 @@ import jwt from "npm:jsonwebtoken@9.0.2";
 
 const JWT_SECRET = Deno.env.get("JWT_SECRET_KEY") || "default-secret-key";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY")!;
 const SLACK_CLIENT_ID = Deno.env.get("SLACK_CLIENT_ID")!;
 const SLACK_CLIENT_SECRET = Deno.env.get("SLACK_CLIENT_SECRET")!;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
 serve(async (req) => {
   try {
@@ -273,7 +273,7 @@ async function sendMailNotification(
   mail: any,
   newsletter: any
 ): Promise<void> {
-  const readLink = `https://mailpocket.me/read?mail=${mail.s3_object_key}`;
+  const readLink = `https://mailpocket.shop/read?mail=${mail.s3_object_key}`;
   const blocks: any[] = [
     {
       type: "section",

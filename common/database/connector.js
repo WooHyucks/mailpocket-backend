@@ -5,10 +5,10 @@ dotenv.config();
 
 // Supabase connection
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.SERVICE_ROLE_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-  console.error('❌ Supabase credentials are missing. Please set SUPABASE_URL and SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY');
+  console.error('❌ Supabase credentials are missing. Please set SUPABASE_URL and SUPABASE_ANON_KEY or SERVICE_ROLE_KEY');
 }
 
 const supabase = createClient(supabaseUrl, supabaseKey);

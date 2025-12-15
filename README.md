@@ -1,48 +1,183 @@
-# MailPocket
+# Supabase CLI
 
-[https://mailpocket.me/](https://mailpocket.me/)
+[![Coverage Status](https://coveralls.io/repos/github/supabase/cli/badge.svg?branch=main)](https://coveralls.io/github/supabase/cli?branch=main) [![Bitbucket Pipelines](https://img.shields.io/bitbucket/pipelines/supabase-cli/setup-cli/master?style=flat-square&label=Bitbucket%20Canary)](https://bitbucket.org/supabase-cli/setup-cli/pipelines) [![Gitlab Pipeline Status](https://img.shields.io/gitlab/pipeline-status/sweatybridge%2Fsetup-cli?label=Gitlab%20Canary)
+](https://gitlab.com/sweatybridge/setup-cli/-/pipelines)
 
-<p align="center">
-  <img src="https://github.com/moonjunyoung/mailpocket/assets/110980148/66e862d4-7fd7-46da-9cd0-7c2d478ac0fd" alt="mailpocket_Logo">
-</p>
+[Supabase](https://supabase.io) is an open source Firebase alternative. We're building the features of Firebase using enterprise-grade open source tools.
 
-# 프로젝트 비전
+This repository contains all the functionality for Supabase CLI.
 
-뉴스레터를 다양하게 구독하면서 메일함이 혼잡해지고 뉴스레터를 찾기 어려워지는 문제에 대응하며
-긴 뉴스레터를 읽기 전에 3줄 요약된 내용을 확인할 수 있는 웹 어플리케이션 입니다.
+- [x] Running Supabase locally
+- [x] Managing database migrations
+- [x] Creating and deploying Supabase Functions
+- [x] Generating types directly from your database schema
+- [x] Making authenticated HTTP requests to [Management API](https://supabase.com/docs/reference/api/introduction)
 
-## 구독
+## Getting started
 
-간편한 프로세스를 통해 다양한 뉴스레터를 구독할 수 있습니다.
+### Install the CLI
 
-- 구독페이지에서 구독한, 구독 가능한 뉴스레터를 확인 가능
-- 뉴스레터 별로 가장 최근의 내용을 3줄 요약하여 해당 뉴스레터가 어떤 내용을 다루는지 먼저 확인 가능
-- 카테고리별로 뉴스레터 리스트를 확인 가능
+Available via [NPM](https://www.npmjs.com) as dev dependency. To install:
 
-## Slack 연동
+```bash
+npm i supabase --save-dev
+```
 
-구독한 뉴스레터의 소식을 Slack을 통하여 알림을 받을 수 있습니다.
+To install the beta release channel:
 
-- 구독이후 Slack 연동을 선택사항으로 두며 연동 시 채널 및 DM으로 뉴스레터 발행 즉시 알림 제공
-- Slack 연동 이후 구독한 뉴스레터의 최근 소식 3개와 웰컴메시지를 전송
-- 마이페이지에서 Slack 채널을 관리할 수 있는 기능 제공
+```bash
+npm i supabase@beta --save-dev
+```
 
-## 뉴스레터 본문
+When installing with yarn 4, you need to disable experimental fetch with the following nodejs config.
 
-모든 사용자는 뉴스레터의 본문을 확인할 수 있습니다.
+```
+NODE_OPTIONS=--no-experimental-fetch yarn add supabase
+```
 
-- Slack 알림에서 요약된 내용과 함께 본문 링크를 제공
-- 본문 확인시 요약된 내용을 먼저 제공하며 해당 뉴스레터를 추가적으로 구독할 수 있음
-- 마이페이지에서 구독한 뉴스레터의 이전 소식을 확인 할 수 있음
+> **Note**
+For Bun versions below v1.0.17, you must add `supabase` as a [trusted dependency](https://bun.sh/guides/install/trusted) before running `bun add -D supabase`.
 
-## 공유 기능
+<details>
+  <summary><b>macOS</b></summary>
 
-뉴스레터의 내용을 카카오톡 및 텍스트로 공유할 수 있습니다.
+  Available via [Homebrew](https://brew.sh). To install:
 
-- 공유시 본문 링크와 함께 요약된 내용이 동반되어 공유
-- 링크를 클릭시 누구나 쉽게 메일포켓의 서비스를 이용할 수 있음
+  ```sh
+  brew install supabase/tap/supabase
+  ```
 
-## 소스코드 보러가기
+  To install the beta release channel:
+  
+  ```sh
+  brew install supabase/tap/supabase-beta
+  brew link --overwrite supabase-beta
+  ```
+  
+  To upgrade:
 
-- [Frontend](https://github.com/moonjunyoung/mailpocket/tree/master/frontend)
-- [Backend](https://github.com/moonjunyoung/mailpocket/tree/master/backend)
+  ```sh
+  brew upgrade supabase
+  ```
+</details>
+
+<details>
+  <summary><b>Windows</b></summary>
+
+  Available via [Scoop](https://scoop.sh). To install:
+
+  ```powershell
+  scoop bucket add supabase https://github.com/supabase/scoop-bucket.git
+  scoop install supabase
+  ```
+
+  To upgrade:
+
+  ```powershell
+  scoop update supabase
+  ```
+</details>
+
+<details>
+  <summary><b>Linux</b></summary>
+
+  Available via [Homebrew](https://brew.sh) and Linux packages.
+
+  #### via Homebrew
+
+  To install:
+
+  ```sh
+  brew install supabase/tap/supabase
+  ```
+
+  To upgrade:
+
+  ```sh
+  brew upgrade supabase
+  ```
+
+  #### via Linux packages
+
+  Linux packages are provided in [Releases](https://github.com/supabase/cli/releases). To install, download the `.apk`/`.deb`/`.rpm`/`.pkg.tar.zst` file depending on your package manager and run the respective commands.
+
+  ```sh
+  sudo apk add --allow-untrusted <...>.apk
+  ```
+
+  ```sh
+  sudo dpkg -i <...>.deb
+  ```
+
+  ```sh
+  sudo rpm -i <...>.rpm
+  ```
+
+  ```sh
+  sudo pacman -U <...>.pkg.tar.zst
+  ```
+</details>
+
+<details>
+  <summary><b>Other Platforms</b></summary>
+
+  You can also install the CLI via [go modules](https://go.dev/ref/mod#go-install) without the help of package managers.
+
+  ```sh
+  go install github.com/supabase/cli@latest
+  ```
+
+  Add a symlink to the binary in `$PATH` for easier access:
+
+  ```sh
+  ln -s "$(go env GOPATH)/bin/cli" /usr/bin/supabase
+  ```
+
+  This works on other non-standard Linux distros.
+</details>
+
+<details>
+  <summary><b>Community Maintained Packages</b></summary>
+
+  Available via [pkgx](https://pkgx.sh/). Package script [here](https://github.com/pkgxdev/pantry/blob/main/projects/supabase.com/cli/package.yml).
+  To install in your working directory:
+
+  ```bash
+  pkgx install supabase
+  ```
+
+  Available via [Nixpkgs](https://nixos.org/). Package script [here](https://github.com/NixOS/nixpkgs/blob/master/pkgs/development/tools/supabase-cli/default.nix).
+</details>
+
+### Run the CLI
+
+```bash
+supabase bootstrap
+```
+
+Or using npx:
+
+```bash
+npx supabase bootstrap
+```
+
+The bootstrap command will guide you through the process of setting up a Supabase project using one of the [starter](https://github.com/supabase-community/supabase-samples/blob/main/samples.json) templates.
+
+## Docs
+
+Command & config reference can be found [here](https://supabase.com/docs/reference/cli/about).
+
+## Breaking changes
+
+We follow semantic versioning for changes that directly impact CLI commands, flags, and configurations.
+
+However, due to dependencies on other service images, we cannot guarantee that schema migrations, seed.sql, and generated types will always work for the same CLI major version. If you need such guarantees, we encourage you to pin a specific version of CLI in package.json.
+
+## Developing
+
+To run from source:
+
+```sh
+# Go >= 1.22
+go run . help
+```

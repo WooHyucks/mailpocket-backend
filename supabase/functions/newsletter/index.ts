@@ -5,9 +5,9 @@ import jwt from "npm:jsonwebtoken@9.0.2";
 
 const JWT_SECRET = Deno.env.get("JWT_SECRET_KEY") || "default-secret-key";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY")!;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
 serve(async (req) => {
   try {
@@ -36,6 +36,7 @@ serve(async (req) => {
     }
 
     const userId = getUserIdFromToken(authHeader);
+    console.log(`Request from user ${userId}, path: ${path}`);
 
     // GET /newsletter - Get newsletters list
     if (method === "GET" && path.endsWith("/newsletter")) {
@@ -47,12 +48,19 @@ serve(async (req) => {
 
       // Get subscribed newsletter IDs first
       let subscribedNewsletterIds: number[] = [];
-      if (subscribeStatus === "subscribed" || subscribeStatus === "not_subscribed") {
-        const { data: subscriptions } = await supabase
+      if (subscribeStatus === "subscribed" || subscribeStatus === "not_subscribed" || subscribeStatus === "subscribable") {
+        const { data: subscriptions, error: subscriptionError } = await supabase
           .from("subscribe")
           .select("newsletter_id")
           .eq("user_id", userId);
+        
+        if (subscriptionError) {
+          console.error("Subscription query error:", subscriptionError);
+          throw subscriptionError;
+        }
+        
         subscribedNewsletterIds = subscriptions?.map((s) => s.newsletter_id) || [];
+        console.log(`User ${userId} subscribed newsletters:`, subscribedNewsletterIds);
       }
 
       let query = supabase
@@ -69,7 +77,7 @@ serve(async (req) => {
           query = query.in("id", subscribedNewsletterIds);
         } else {
           // No subscriptions, return empty array
-          return new Response(JSON.stringify([]), {
+          return new Response(JSON.stringify({ data: [], meta: { total: 0, cursor: null, has_more: false } }), {
             headers: {
               "Content-Type": "application/json",
               "Access-Control-Allow-Origin": "*",
@@ -77,6 +85,27 @@ serve(async (req) => {
             status: 200,
           });
         }
+      } else if (subscribeStatus === "subscribable") {
+        // For subscribable, exclude subscribed newsletters
+        // If all newsletters are subscribed, return empty array early
+        if (subscribedNewsletterIds.length > 0) {
+          // Get total newsletter count to check if all are subscribed
+          const { count: totalCount } = await supabase
+            .from("newsletter")
+            .select("*", { count: "exact", head: true });
+          
+          if (totalCount && subscribedNewsletterIds.length >= totalCount) {
+            // All newsletters are subscribed, return empty array
+            return new Response(JSON.stringify({ data: [], meta: { total: 0, cursor: null, has_more: false } }), {
+              headers: {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+              },
+              status: 200,
+            });
+          }
+        }
+        // Filter will be applied after fetching
       } else if (subscribeStatus === "not_subscribed") {
         // Filter will be applied after fetching
       }
@@ -87,14 +116,31 @@ serve(async (req) => {
       }
 
       // Filter by has mail
+      // If subscribed, only check mail for subscribed newsletters
       if (inMail) {
-        const { data: mails } = await supabase
-          .from("mail")
-          .select("newsletter_id")
-          .not("newsletter_id", "is", null);
-        const newsletterIdsWithMail = [
-          ...new Set(mails?.map((m) => m.newsletter_id).filter((id) => id !== null)),
-        ];
+        let newsletterIdsWithMail: number[] = [];
+        
+        if (subscribeStatus === "subscribed" && subscribedNewsletterIds.length > 0) {
+          // For subscribed newsletters, only check mail for subscribed ones
+          const { data: mails } = await supabase
+            .from("mail")
+            .select("newsletter_id")
+            .in("newsletter_id", subscribedNewsletterIds)
+            .not("newsletter_id", "is", null);
+          newsletterIdsWithMail = [
+            ...new Set(mails?.map((m) => m.newsletter_id).filter((id) => id !== null)),
+          ];
+        } else {
+          // For other cases, check all newsletters with mail
+          const { data: mails } = await supabase
+            .from("mail")
+            .select("newsletter_id")
+            .not("newsletter_id", "is", null);
+          newsletterIdsWithMail = [
+            ...new Set(mails?.map((m) => m.newsletter_id).filter((id) => id !== null)),
+          ];
+        }
+        
         if (newsletterIdsWithMail.length > 0) {
           query = query.in("id", newsletterIdsWithMail);
         } else {
@@ -109,30 +155,51 @@ serve(async (req) => {
         }
       }
 
-      // Sort
-      if (sortType === "ranking") {
-        query = query.order("subscribe_ranking.subscribe_count", { ascending: false });
-      } else {
+      // Sort - Note: Can't order by related table column directly, will sort after fetching
+      if (sortType !== "ranking") {
         query = query.order("last_recv_at", { ascending: false });
       }
 
-      // Pagination
-      if (cursor) {
-        query = query.range(parseInt(cursor), parseInt(cursor) + 19);
+      // Pagination - For ranking sort or subscribed status, fetch all data first
+      // For non-ranking sort with subscribable/not_subscribed, apply pagination at DB level
+      if (sortType === "ranking" || subscribeStatus === "subscribed") {
+        // Fetch up to 10000 records for ranking sort or subscribed newsletters
+        query = query.limit(10000);
       } else {
-        query = query.range(0, 19);
+        const fetchLimit = 8;
+        if (cursor) {
+          query = query.range(parseInt(cursor), parseInt(cursor) + fetchLimit - 1);
+        } else {
+          query = query.range(0, fetchLimit - 1);
+        }
       }
 
       const { data: newsletters, error } = await query;
 
       if (error) throw error;
 
-      // Filter out subscribed newsletters if not_subscribed
+      // Filter out subscribed newsletters if not_subscribed or subscribable
       let filteredNewsletters = newsletters || [];
-      if (subscribeStatus === "not_subscribed" && subscribedNewsletterIds.length > 0) {
+      if ((subscribeStatus === "not_subscribed" || subscribeStatus === "subscribable") && subscribedNewsletterIds.length > 0) {
         filteredNewsletters = filteredNewsletters.filter(
           (n) => !subscribedNewsletterIds.includes(n.id)
         );
+      }
+
+      // Sort by ranking if needed (after filtering)
+      if (sortType === "ranking") {
+        filteredNewsletters = filteredNewsletters.sort((a, b) => {
+          const aCount = a.subscribe_ranking?.[0]?.subscribe_count || 0;
+          const bCount = b.subscribe_ranking?.[0]?.subscribe_count || 0;
+          return bCount - aCount; // Descending order
+        });
+      }
+
+      // Apply pagination for ranking sort (after sorting)
+      // For subscribed status, return all newsletters without pagination
+      if (sortType === "ranking" && subscribeStatus !== "subscribed") {
+        const startIdx = cursor ? parseInt(cursor) : 0;
+        filteredNewsletters = filteredNewsletters.slice(startIdx, startIdx + 8);
       }
 
       // Add mail info if in_mail is true
@@ -152,7 +219,19 @@ serve(async (req) => {
         }
       }
 
-      return new Response(JSON.stringify(filteredNewsletters || []), {
+      // Add metadata for debugging
+      const response = {
+        data: filteredNewsletters || [],
+        meta: {
+          total: filteredNewsletters?.length || 0,
+          cursor: cursor ? parseInt(cursor) : null,
+          has_more: sortType === "ranking" 
+            ? (filteredNewsletters?.length || 0) > (cursor ? parseInt(cursor) + 8 : 8)
+            : (filteredNewsletters?.length || 0) === 8,
+        },
+      };
+
+      return new Response(JSON.stringify(response), {
         headers: {
           "Content-Type": "application/json",
           "Access-Control-Allow-Origin": "*",
@@ -219,6 +298,16 @@ serve(async (req) => {
     if (method === "GET" && lastMailMatch) {
       const newsletterId = parseInt(lastMailMatch[1]);
 
+      // Get newsletter name
+      const { data: newsletter, error: newsletterError } = await supabase
+        .from("newsletter")
+        .select("name")
+        .eq("id", newsletterId)
+        .single();
+
+      if (newsletterError) throw newsletterError;
+
+      // Get last mail
       const { data: mail, error } = await supabase
         .from("mail")
         .select("*")
@@ -229,7 +318,10 @@ serve(async (req) => {
 
       if (error && error.code !== "PGRST116") throw error; // PGRST116 = no rows returned
 
-      return new Response(JSON.stringify(mail || null), {
+      // Add newsletter name to response
+      const response = mail ? { ...mail, name: newsletter?.name || null } : null;
+
+      return new Response(JSON.stringify(response), {
         headers: {
           "Content-Type": "application/json",
           "Access-Control-Allow-Origin": "*",
@@ -242,8 +334,9 @@ serve(async (req) => {
     const subscribeMatch = path.match(/\/newsletter\/(\d+)\/subscribe$/);
     if (method === "POST" && subscribeMatch) {
       const newsletterId = parseInt(subscribeMatch[1]);
+      console.log(`Subscribe request: user ${userId}, newsletter ${newsletterId}`);
 
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from("subscribe")
         .insert({
           newsletter_id: newsletterId,
@@ -252,10 +345,20 @@ serve(async (req) => {
         .select()
         .single();
 
-      if (error && error.code !== "23505") throw error; // 23505 = unique violation (already subscribed)
+      if (error) {
+        // 23505 = unique violation (already subscribed)
+        if (error.code === "23505") {
+          return new Response(JSON.stringify({ message: "Already subscribed" }), {
+            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+            status: 200,
+          });
+        }
+        console.error("Subscribe error:", error);
+        throw error;
+      }
 
-      return new Response(null, {
-        headers: { "Access-Control-Allow-Origin": "*" },
+      return new Response(JSON.stringify({ success: true, data }), {
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
         status: 201,
       });
     }

@@ -4,22 +4,29 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import OpenAI from "npm:openai@4.20.1";
 import { simpleParser } from "npm:mailparser@3.6.5";
 import * as cheerio from "npm:cheerio@1.0.0-rc.12";
+import { S3Client, GetObjectCommand } from "npm:@aws-sdk/client-s3";
 
+// Environment variables
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY")!;
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY")!;
 const SLACK_LOGGING_WEBHOOK = Deno.env.get("SLACK_LOGGING_CHANNEL_WEBHOOK_URL");
 const SLACK_UNKNOWN_EMAIL_WEBHOOK = Deno.env.get("SLACK_UNKNOWN_EMAIL_ADDRESS_WEBHOOK_URL");
+const AWS_ACCESS_KEY_ID = Deno.env.get("AWS_ACCESS_KEY_ID")!;
+const AWS_SECRET_ACCESS_KEY = Deno.env.get("AWS_SECRET_ACCESS_KEY")!;
+const AWS_REGION = Deno.env.get("AWS_REGION") || "us-east-1";
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+// Constants
+const OPENAI_MODEL = "gpt-4o-mini";
+const MAX_SUMMARY_RETRIES = 3;
+const S3_BUCKET = "mailpocket-email";
+const BASE_URL = "https://mailpocket.shop";
 
-const MODEL = "gpt-3.5-turbo-0125";
-const PROMPT = `
+const OPENAI_PROMPT = `
 # 요약
 - 당신은 긴 뉴스 기사를 요약하여 사람들에게 전달하는 기자이자 아나운서의 역할을 맡고 있습니다. 제시되는 뉴스 기사들의 핵심 내용을 요약하여 주세요. 요약된 내용은 기사의 주요 사건, 그 사건의 영향 및 결과, 그리고 그 사건의 장기적 중요성을 포함해야 합니다.
 - 주제목은 해당 기사의 소식을 한줄 요약 합니다.
-- 내용은 각 기사별로 3 ~ 4문장으로 구성되어야 하며, 서론, 본론, 결론의 구조로 명확히 구분되어야 합니다. 각 내용은 기사의 주제에 맞는 내용만 다루어야합니다.
+- 내용은 각 기사별로 3문장으로 구성되어야 하며, 서론, 본론, 결론의 구조로 명확히 구분되어야 합니다. 각 내용은 기사의 주제에 맞는 내용만 다루어야합니다.
 - 현재형을 사용하고, 직접적인 말투보다는 설명적이고 객관적인 표현을 사용합니다.
 - '논란이 있다'과 같은 표현을 '논란이 있습니다'로 변경하여, 문장을 더 공식적이고 완결된 형태로 마무리합니다.
 - 개별 문장 내에서, 사실을 전달하는 동시에 적절한 예의를 갖추어 표현하며, 독자에게 정보를 제공하는 것이 목적임을 분명히 합니다.
@@ -30,250 +37,151 @@ const PROMPT = `
 - "주제", "내용" 등 단순한 주제목을 절대로 사용하지마세요.
 `;
 
-serve(async (req) => {
-  try {
-    // CORS headers
-    if (req.method === "OPTIONS") {
-      return new Response(null, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "content-type",
-        },
-      });
-    }
-
-    const { s3_object_key } = await req.json();
-
-    if (!s3_object_key) {
-      return new Response(
-        JSON.stringify({ error: "s3_object_key is required" }),
-        {
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-          status: 400,
-        }
-      );
-    }
-
-    // Download email from Supabase Storage
-    const { data: file, error: downloadError } = await supabase.storage
-      .from("mails")
-      .download(s3_object_key);
-
-    if (downloadError || !file) {
-      return new Response(
-        JSON.stringify({ error: "Failed to download email file" }),
-        {
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-          status: 404,
-        }
-      );
-    }
-
-    const emailContent = await file.text();
-
-    // Parse email
-    const parsed = await simpleParser(emailContent);
-    const fromEmail = parsed.from?.text || "";
-    const fromMatch = fromEmail.match(/^(.+?)\s*<(.+?)>$/);
-    const fromEmailAddress = fromMatch ? fromMatch[2] : fromEmail;
-    const subject = parsed.subject || "";
-    const htmlBody = parsed.html || parsed.textAsHtml || "";
-
-    // Log to Slack
-    if (SLACK_LOGGING_WEBHOOK) {
-      await fetch(SLACK_LOGGING_WEBHOOK, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          blocks: [
-            {
-              type: "section",
-              fields: [
-                {
-                  type: "mrkdwn",
-                  text: `email : ${fromEmailAddress}\nid : ${fromMatch ? fromMatch[1].replace(/"/g, "") : fromEmail}\n*<https://mailpocket.me/read?mail=${s3_object_key}|${subject}>*`,
-                },
-              ],
-            },
-          ],
-        }),
-      }).catch(console.error);
-    }
-
-    // Find newsletter by from_email
-    const { data: newsletter, error: newsletterError } = await supabase
-      .from("newsletter_email_addresses")
-      .select("newsletter_id, newsletter:newsletter_id(*)")
-      .eq("email_address", fromEmailAddress)
-      .single();
-
-    if (newsletterError || !newsletter) {
-      // Unknown email - log to Slack
-      if (SLACK_UNKNOWN_EMAIL_WEBHOOK) {
-        await fetch(SLACK_UNKNOWN_EMAIL_WEBHOOK, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            blocks: [
-              {
-                type: "section",
-                fields: [
-                  {
-                    type: "mrkdwn",
-                    text: `${fromEmailAddress}\nis unknown email address\n뉴스레터: ${fromMatch ? fromMatch[1].replace(/"/g, "") : fromEmail}\n제목: ${subject}\n링크: https://mailpocket.me/read?mail=${s3_object_key}\nS3 OBJ KEY: ${s3_object_key}`,
-                  },
-                ],
-              },
-            ],
-          }),
-        }).catch(console.error);
-      }
-
-      return new Response(
-        JSON.stringify({ error: `Unknown from email: ${fromEmailAddress}` }),
-        {
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-          status: 400,
-        }
-      );
-    }
-
-    const newsletterId = newsletter.newsletter_id;
-
-    // Generate summary using OpenAI
-    const summaryList = await generateSummary(htmlBody);
-
-    // Save mail to database
-    const { data: mail, error: mailError } = await supabase
-      .from("mail")
-      .insert({
-        s3_object_key,
-        subject,
-        summary_list: summaryList,
-        newsletter_id: newsletterId,
-        recv_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
-
-    if (mailError) {
-      console.error("Error saving mail:", mailError);
-      return new Response(
-        JSON.stringify({ error: "Failed to save mail" }),
-        {
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-          status: 500,
-        }
-      );
-    }
-
-    // Update newsletter last_recv_at
-    await supabase
-      .from("newsletter")
-      .update({ last_recv_at: new Date().toISOString() })
-      .eq("id", newsletterId);
-
-    // Send Slack notifications to subscribed channels
-    // First get all users subscribed to this newsletter
-    const { data: subscriptions } = await supabase
-      .from("subscribe")
-      .select("user_id")
-      .eq("newsletter_id", newsletterId);
-
-    if (subscriptions && subscriptions.length > 0) {
-      const userIds = subscriptions.map((s) => s.user_id);
-      
-      // Get channels for these users
-      const { data: channels } = await supabase
-        .from("channel")
-        .select("*")
-        .in("user_id", userIds);
-
-      if (channels && channels.length > 0) {
-        const notifiedChannelIds = new Set<string>();
-        for (const channel of channels) {
-          if (notifiedChannelIds.has(channel.slack_channel_id)) continue;
-          notifiedChannelIds.add(channel.slack_channel_id);
-
-          await sendSlackNotification(channel, mail, newsletter.newsletter);
-        }
-      }
-    }
-
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        message: "Email received and processed successfully",
-        mail_id: mail.id,
-      }),
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*",
-        },
-        status: 200,
-      }
-    );
-  } catch (error) {
-    console.error("Error:", error);
-    return new Response(
-      JSON.stringify({ error: error.message || "Internal server error" }),
-      {
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-        status: 500,
-      }
-    );
-  }
+// Initialize clients
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+const s3 = new S3Client({
+  region: AWS_REGION,
+  credentials: {
+    accessKeyId: AWS_ACCESS_KEY_ID,
+    secretAccessKey: AWS_SECRET_ACCESS_KEY,
+  },
 });
 
-function parsingHtmlText(html: string): string {
+// Types
+interface RequestBody {
+  s3_object_key: string;
+}
+
+interface ParsedEmail {
+  fromEmail: string;
+  fromEmailAddress: string;
+  fromName: string;
+  subject: string;
+  htmlBody: string;
+}
+
+interface NewsletterData {
+  newsletter_id: number;
+  newsletter: {
+    name: string;
+  };
+}
+
+interface MailData {
+  id: number;
+  s3_object_key: string;
+  subject: string;
+  summary_list: Record<string, string>;
+}
+
+interface ChannelData {
+  slack_channel_id: string;
+  webhook_url: string;
+  team_name: string;
+  user_id: number;
+}
+
+// Helper functions
+function createCorsHeaders() {
+  return {
+          "Access-Control-Allow-Origin": "*",
+    "Content-Type": "application/json",
+  };
+}
+
+function createErrorResponse(message: string, status: number) {
+      return new Response(
+    JSON.stringify({ error: message }),
+    {
+      headers: createCorsHeaders(),
+      status,
+    }
+  );
+}
+
+function parseEmailFrom(fromText: string): { email: string; name: string } {
+  const match = fromText.match(/^(.+?)\s*<(.+?)>$/);
+  if (match) {
+    return {
+      email: match[2],
+      name: match[1].replace(/"/g, ""),
+    };
+  }
+  return {
+    email: fromText,
+    name: fromText,
+  };
+}
+
+async function parseEmailContent(emailContent: string): Promise<ParsedEmail> {
+  const parsed = await simpleParser(emailContent);
+  const fromText = parsed.from?.text || "";
+  const { email: fromEmailAddress, name: fromName } = parseEmailFrom(fromText);
+
+
+  const html = parsed.html || parsed.textAsHtml || "";
+
+
+  return {
+    fromEmail: fromText,
+    fromEmailAddress,
+    fromName,
+    subject: parsed.subject || "",
+    htmlBody: parsed.html || parsed.textAsHtml || "",
+  };
+}
+
+function extractHtmlText(html: string): string {
   const $ = cheerio.load(html);
   const text = $("body").text();
-  const stripText = text.trim();
-  const replaceText = stripText.replace(/\n/g, "");
-  return replaceText;
+  return text.trim().replace(/\n/g, "");
+}
+
+function cleanJsonContent(content: string): string {
+  if (content.includes("```json")) {
+    const jsonPart = content.split("```json")[1].split("```")[0];
+    return "{" + jsonPart.replace(/{/g, "").replace(/}/g, "") + "}";
+  }
+  return content;
+}
+
+function validateSummary(summaryList: Record<string, string>): void {
+  if (Object.keys(summaryList).length === 0) {
+    throw new Error("Empty summary");
+  }
+
+  for (const value of Object.values(summaryList)) {
+    if (typeof value !== "string") {
+      throw new Error("Invalid summary format");
+    }
+  }
 }
 
 async function generateSummary(html: string): Promise<Record<string, string>> {
-  for (let i = 0; i < 3; i++) {
+  const htmlText = extractHtmlText(html);
+
+  for (let attempt = 0; attempt < MAX_SUMMARY_RETRIES; attempt++) {
     try {
-      const htmlText = parsingHtmlText(html);
       const response = await openai.chat.completions.create({
-        model: MODEL,
+        model: OPENAI_MODEL,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: PROMPT },
+          { role: "system", content: OPENAI_PROMPT },
           { role: "user", content: `뉴스:${htmlText}` },
         ],
         temperature: 0,
       });
 
       let content = response.choices[0].message.content || "";
+      content = cleanJsonContent(content);
+      const summaryList = JSON.parse(content) as Record<string, string>;
 
-      if (content.includes("```json")) {
-        content = content.split("```json")[1].split("```")[0];
-        content = content.replace(/{/g, "").replace(/}/g, "");
-        content = "{" + content + "}";
-      }
-
-      const summaryList = JSON.parse(content);
-
-      // Validate format
-      for (const value of Object.values(summaryList)) {
-        if (typeof value !== "string") {
-          throw new Error("Invalid summary format");
-        }
-      }
-
-      if (Object.keys(summaryList).length === 0) {
-        throw new Error("Empty summary");
-      }
-
+      validateSummary(summaryList);
       return summaryList;
     } catch (error) {
-      console.error(`Summary attempt ${i + 1} failed:`, error);
-      if (i === 2) {
+      console.error(`Summary attempt ${attempt + 1} failed:`, error);
+      if (attempt === MAX_SUMMARY_RETRIES - 1) {
         return { "요약을 실패했습니다.": "본문을 확인해주세요." };
       }
     }
@@ -282,13 +190,159 @@ async function generateSummary(html: string): Promise<Record<string, string>> {
   return { "요약을 실패했습니다.": "본문을 확인해주세요." };
 }
 
+async function sendSlackMessage(webhookUrl: string, blocks: any[]): Promise<void> {
+  await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ blocks }),
+  }).catch((error) => {
+    console.error("Failed to send Slack message:", error);
+  });
+}
+
+async function logEmailToSlack(
+  fromEmailAddress: string,
+  fromName: string,
+  subject: string,
+  s3ObjectKey: string
+): Promise<void> {
+  if (!SLACK_LOGGING_WEBHOOK) return;
+
+  const readLink = `${BASE_URL}/read?mail=${s3ObjectKey}`;
+  await sendSlackMessage(SLACK_LOGGING_WEBHOOK, [
+            {
+              type: "section",
+              fields: [
+                {
+                  type: "mrkdwn",
+          text: `email : ${fromEmailAddress}\nid : ${fromName}\n*<${readLink}|${subject}>*`,
+                },
+              ],
+            },
+  ]);
+}
+
+async function logUnknownEmailToSlack(
+  fromEmailAddress: string,
+  fromName: string,
+  subject: string,
+  s3ObjectKey: string
+): Promise<void> {
+  if (!SLACK_UNKNOWN_EMAIL_WEBHOOK) return;
+
+  await sendSlackMessage(SLACK_UNKNOWN_EMAIL_WEBHOOK, [
+              {
+                type: "section",
+                fields: [
+                  {
+                    type: "mrkdwn",
+          text: `${fromEmailAddress}\nis unknown email address\n뉴스레터: ${fromName}\n제목: ${subject}\n링크: ${BASE_URL}/read?mail=${s3ObjectKey}\nS3 OBJ KEY: ${s3ObjectKey}`,
+                  },
+                ],
+              },
+  ]);
+}
+
+async function findNewsletterByEmail(
+  emailAddress: string
+): Promise<NewsletterData | null> {
+  const { data, error } = await supabase
+    .from("newsletter_email_addresses")
+    .select("newsletter_id, newsletter:newsletter_id(*)")
+    .eq("email_address", emailAddress)
+    .single();
+
+  if (error || !data) {
+    return null;
+  }
+
+  return data as NewsletterData;
+}
+
+async function saveMail(
+  s3ObjectKey: string,
+  subject: string,
+  summaryList: Record<string, string>,
+  newsletterId: number,
+  htmlBody: string
+): Promise<MailData> {
+  const { data, error } = await supabase
+      .from("mail")
+      .insert({
+      s3_object_key: s3ObjectKey,
+        subject,
+        summary_list: summaryList,
+        newsletter_id: newsletterId,
+        html_body: htmlBody,
+        recv_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+  if (error || !data) {
+    throw new Error(`Failed to save mail: ${error?.message || "Unknown error"}`);
+  }
+
+  return data as MailData;
+}
+
+async function updateNewsletterLastRecvAt(newsletterId: number): Promise<void> {
+    await supabase
+      .from("newsletter")
+      .update({ last_recv_at: new Date().toISOString() })
+      .eq("id", newsletterId);
+}
+
+async function sendSlackNotifications(
+  mail: MailData,
+  newsletter: NewsletterData
+): Promise<void> {
+  // Get all users subscribed to this newsletter
+    const { data: subscriptions } = await supabase
+      .from("subscribe")
+      .select("user_id")
+    .eq("newsletter_id", newsletter.newsletter_id);
+
+  if (!subscriptions || subscriptions.length === 0) {
+    return;
+  }
+
+      const userIds = subscriptions.map((s) => s.user_id);
+      
+      // Get channels for these users
+      const { data: channels } = await supabase
+        .from("channel")
+        .select("*")
+        .in("user_id", userIds);
+
+  if (!channels || channels.length === 0) {
+    return;
+  }
+
+  // Send notifications to unique channels
+        const notifiedChannelIds = new Set<string>();
+  for (const channel of channels as ChannelData[]) {
+    // Skip if no webhook URL (Slack not configured)
+    if (!channel.webhook_url) {
+      continue;
+    }
+
+    if (notifiedChannelIds.has(channel.slack_channel_id)) {
+      continue;
+    }
+    notifiedChannelIds.add(channel.slack_channel_id);
+
+    await sendSlackNotification(channel, mail, newsletter);
+  }
+}
+
 async function sendSlackNotification(
-  channel: any,
-  mail: any,
-  newsletter: any
+  channel: ChannelData,
+  mail: MailData,
+  newsletter: NewsletterData
 ): Promise<void> {
   const utmSource = `&utm_source=slack&utm_medium=bot&utm_campaign=${channel.team_name}`;
-  const readLink = `https://mailpocket.me/read?mail=${mail.s3_object_key}${utmSource}`;
+  const readLink = `${BASE_URL}/read?mail=${mail.s3_object_key}${utmSource}`;
 
   const blocks: any[] = [
     {
@@ -296,7 +350,7 @@ async function sendSlackNotification(
       fields: [
         {
           type: "mrkdwn",
-          text: `${newsletter.name}의 새로운 소식이 도착했어요.\n*<${readLink}|${mail.subject}>*`,
+          text: `${newsletter.newsletter.name}의 새로운 소식이 도착했어요.\n*<${readLink}|${mail.subject}>*`,
         },
       ],
     },
@@ -314,10 +368,119 @@ async function sendSlackNotification(
     }
   }
 
-  await fetch(channel.webhook_url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ blocks }),
-  }).catch(console.error);
+  await sendSlackMessage(channel.webhook_url, blocks);
 }
 
+// Main handler
+serve(async (req) => {
+  try {
+    // Handle CORS preflight
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "content-type",
+        },
+      });
+    }
+
+    // Parse request body
+    let body: RequestBody;
+    try {
+      body = await req.json();
+    } catch (error) {
+      return createErrorResponse("Invalid JSON body", 400);
+    }
+
+    const { s3_object_key } = body;
+    if (!s3_object_key) {
+      return createErrorResponse("s3_object_key is required", 400);
+    }
+
+    // Download email from AWS S3
+    let emailContent: string;
+    try {
+      const result = await s3.send(
+        new GetObjectCommand({
+          Bucket: S3_BUCKET,
+          Key: s3_object_key,
+        })
+      );
+
+      if (!result.Body) {
+        return createErrorResponse("Failed to download email file: Empty response", 404);
+      }
+
+      emailContent = await result.Body.transformToString();
+    } catch (error) {
+      console.error("Failed to download email from S3:", error);
+      return createErrorResponse(
+        `Failed to download email file: ${error instanceof Error ? error.message : "Unknown error"}`,
+        404
+      );
+    }
+
+    // Parse email
+    const parsedEmail = await parseEmailContent(emailContent);
+
+    // Log email to Slack
+    await logEmailToSlack(
+      parsedEmail.fromEmailAddress,
+      parsedEmail.fromName,
+      parsedEmail.subject,
+      s3_object_key
+    );
+
+    // Find newsletter by email address
+    const newsletter = await findNewsletterByEmail(parsedEmail.fromEmailAddress);
+    if (!newsletter) {
+      await logUnknownEmailToSlack(
+        parsedEmail.fromEmailAddress,
+        parsedEmail.fromName,
+        parsedEmail.subject,
+        s3_object_key
+      );
+      return createErrorResponse(
+        `Unknown from email: ${parsedEmail.fromEmailAddress}`,
+        400
+      );
+    }
+
+    // Generate summary using OpenAI
+    const summaryList = await generateSummary(parsedEmail.htmlBody);
+
+    // Save mail to database (including html_body for faster retrieval)
+    const mail = await saveMail(
+      s3_object_key,
+      parsedEmail.subject,
+      summaryList,
+      newsletter.newsletter_id,
+      parsedEmail.htmlBody
+    );
+
+    // Update newsletter last_recv_at
+    await updateNewsletterLastRecvAt(newsletter.newsletter_id);
+
+    // Send Slack notifications to subscribed channels
+    await sendSlackNotifications(mail, newsletter);
+
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        message: "Email received and processed successfully",
+        mail_id: mail.id,
+      }),
+      {
+        headers: createCorsHeaders(),
+        status: 200,
+      }
+    );
+  } catch (error) {
+    console.error("Error processing email:", error);
+    return createErrorResponse(
+      error instanceof Error ? error.message : "Internal server error",
+      500
+    );
+  }
+});

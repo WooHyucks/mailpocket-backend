@@ -7,7 +7,7 @@ export class Mail {
     this.mail_content = mail_content;
     this.s3_object_key = s3_object_key;
     this.subject = subject;
-    this.read_link = `https://mailpocket.me/read?mail=${this.s3_object_key}`;
+    this.read_link = `https://mailpocket.shop/read?mail=${this.s3_object_key}`;
     this.summary_list = summary_list;
     if (this.summary_list) {
       this.share_text = this._makeShareText();
