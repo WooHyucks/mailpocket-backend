@@ -1,7 +1,7 @@
 import { Mail } from '../mail/domain.js';
 
 export class NewsLetter {
-  constructor({ id, name, category_id, send_date, mail = null, mails = null, operating_status = null }) {
+  constructor({ id, name, category_id, send_date, mail = null, mails = null, operating_status = null, language = null }) {
     this.id = id;
     this.name = name;
     this.category_id = category_id;
@@ -9,6 +9,7 @@ export class NewsLetter {
     this.mail = mail;
     this.mails = mails;
     this.operating_status = operating_status;
+    this.language = language;
   }
 }
 

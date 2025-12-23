@@ -23,6 +23,38 @@ const PROMPT = `
 - "주제", "내용" 등 단순한 주제목을 절대로 사용하지마세요.
 `;
 
+const PROMPT_FOR_ENGLISH = `
+# Summary and Translation
+- You are a journalist and announcer who summarizes long news articles and delivers them to people. Summarize the key content of the news articles provided. The summary should include the main events, their impact and results, and their long-term importance.
+- The subject title should be a one-line summary of the news.
+- The content should consist of 3 sentences per article, clearly divided into introduction, body, and conclusion. Each content should only cover topics relevant to the article.
+- Use present tense and use descriptive and objective expressions rather than direct speech.
+- Translate the summary into natural Korean. The translation should maintain the original meaning without exaggeration or distortion.
+- Use formal and complete sentence endings in Korean (e.g., "논란이 있습니다" instead of "논란이 있다").
+- Within individual sentences, convey facts while maintaining appropriate courtesy and clearly indicate that the purpose is to provide information to readers.
+
+# Output
+- You must organize your answer in JSON format. Each subject title should be the Key and the content should be the Value.
+- Never use "nested JSON" or "hierarchical JSON" structures in JSON responses.
+- Never use simple subject titles like "주제" or "내용".
+- All output must be in Korean.
+`;
+
+const TRANSLATE_PROMPT = `
+당신은 해외 뉴스레터를 한국어로 번역하는 전문가입니다.
+
+규칙:
+- 반드시 한국어로 번역합니다.
+- 원문의 의미를 훼손하거나 과장하지 않습니다.
+- 직역이 아닌 자연스러운 한국어 번역을 합니다.
+- 뉴스레터 문체를 유지합니다.
+- 불필요한 서론, 요약, 결론을 추가하지 않습니다.
+- HTML 태그를 생성하지 말고 순수 텍스트로만 출력합니다.
+- 문단 구분은 줄바꿈으로 자연스럽게 유지합니다.
+`;
+
+const MAX_TRANSLATE_SOURCE_LENGTH = 5500;
+
 export function parsingHtmlText(html) {
   const $ = cheerio.load(html);
   const text = $('body').text();
@@ -31,16 +63,36 @@ export function parsingHtmlText(html) {
   return replaceText;
 }
 
-export async function mailSummary(fromEmail, subject, html) {
+function extractTranslatableText(html) {
+  const $ = cheerio.load(html);
+  $('script, style, head').remove();
+  const text = $('body').text();
+  const normalized = text
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\s*\n\s*/g, '\n')
+    .trim();
+
+  return normalized.slice(0, MAX_TRANSLATE_SOURCE_LENGTH);
+}
+
+export async function mailSummary(fromEmail, subject, html, language = 'ko') {
   for (let i = 0; i < 3; i++) {
     try {
       const htmlText = parsingHtmlText(html);
+      const prompt = language === 'en' ? PROMPT_FOR_ENGLISH : PROMPT;
+      const userContent = language === 'en' 
+        ? `News article to summarize and translate to Korean:\n\n${htmlText}`
+        : `뉴스:${htmlText}`;
+      
       const response = await openai.chat.completions.create({
         model: MODEL,
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: PROMPT },
-          { role: 'user', content: `뉴스:${htmlText}` }
+          { role: 'system', content: prompt },
+          { role: 'user', content: userContent }
         ],
         temperature: 0
       });
@@ -75,6 +127,28 @@ export async function mailSummary(fromEmail, subject, html) {
   }
 
   return { '요약을 실패했습니다.': '본문을 확인해주세요.' };
+}
+
+export async function mailTranslateToKorean(html) {
+  const text = extractTranslatableText(html || '');
+  if (!text) return null;
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: MODEL,
+      messages: [
+        { role: 'system', content: TRANSLATE_PROMPT },
+        { role: 'user', content: text }
+      ],
+      temperature: 0
+    });
+
+    const translated = response.choices[0].message.content?.trim() || null;
+    return translated || null;
+  } catch (error) {
+    console.error('Translation failed:', error);
+    return null;
+  }
 }
 
 

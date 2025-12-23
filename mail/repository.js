@@ -82,7 +82,9 @@ export class MailRepository extends S3Connector {
         id: mailModel.id,
         s3_object_key: mailModel.s3_object_key,
         subject: mailModel.subject,
-        summary_list: typeof mailModel.summary_list === 'string' ? JSON.parse(mailModel.summary_list) : mailModel.summary_list
+        summary_list: typeof mailModel.summary_list === 'string' ? JSON.parse(mailModel.summary_list) : mailModel.summary_list,
+        html_body: mailModel.html_body,
+        translated_body: mailModel.translated_body
       }));
     }
   };
@@ -101,7 +103,9 @@ export class MailRepository extends S3Connector {
           subject: this.mail.subject,
           summary_list: this.mail.summary_list ? JSON.stringify(this.mail.summary_list) : null,
           newsletter_id: this.mail.newsletter_id,
-          recv_at: this.mail.date
+          recv_at: this.mail.date,
+          html_body: this.mail.html_body,
+          translated_body: this.mail.translated_body || null
         })
         .select()
         .single();
@@ -133,7 +137,9 @@ export class MailRepository extends S3Connector {
         s3_object_key: data.s3_object_key,
         subject: data.subject,
         summary_list: typeof data.summary_list === 'string' ? JSON.parse(data.summary_list) : data.summary_list,
-        newsletter_id: data.newsletter_id
+        newsletter_id: data.newsletter_id,
+        html_body: data.html_body,
+        translated_body: data.translated_body
       });
     }
   };
@@ -160,6 +166,8 @@ export class MailRepository extends S3Connector {
       this.mail.summary_list = typeof data.summary_list === 'string' ? JSON.parse(data.summary_list) : data.summary_list;
       this.mail.share_text = this.mail._makeShareText();
       this.mail.newsletter_id = data.newsletter_id;
+      this.mail.html_body = data.html_body;
+      this.mail.translated_body = data.translated_body;
       return true;
     }
   };
@@ -241,7 +249,9 @@ export class MailRepository extends S3Connector {
         s3_object_key: data.s3_object_key,
         subject: data.subject,
         summary_list: typeof data.summary_list === 'string' ? JSON.parse(data.summary_list) : data.summary_list,
-        newsletter_id: data.newsletter_id
+        newsletter_id: data.newsletter_id,
+        html_body: data.html_body,
+        translated_body: data.translated_body
       });
     }
   };

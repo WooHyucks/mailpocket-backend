@@ -2,7 +2,17 @@ import { mailSummary } from '../common/gpt_prompt.js';
 import { simpleParser } from 'mailparser';
 
 export class Mail {
-  constructor({ id, mail_content = null, s3_object_key = null, subject = null, summary_list = null, newsletter_id = null, recv_at = null }) {
+  constructor({
+    id,
+    mail_content = null,
+    s3_object_key = null,
+    subject = null,
+    summary_list = null,
+    newsletter_id = null,
+    recv_at = null,
+    html_body = null,
+    translated_body = null
+  }) {
     this.id = id;
     this.mail_content = mail_content;
     this.s3_object_key = s3_object_key;
@@ -14,6 +24,8 @@ export class Mail {
     }
     this.newsletter_id = newsletter_id;
     this.recv_at = recv_at;
+    this.html_body = html_body;
+    this.translated_body = translated_body;
   }
 
   _makeShareText() {
@@ -72,8 +84,8 @@ export class Mail {
     }
   }
 
-  async summary() {
-    this.summary_list = await mailSummary(this.from_email, this.subject, this.html_body);
+  async summary(language = 'ko') {
+    this.summary_list = await mailSummary(this.from_email, this.subject, this.html_body, language);
   }
 
   setNewsletterId(newsletter_id) {

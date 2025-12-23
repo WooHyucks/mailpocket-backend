@@ -21,6 +21,7 @@ const OPENAI_MODEL = "gpt-4o-mini";
 const MAX_SUMMARY_RETRIES = 3;
 const S3_BUCKET = "mailpocket-email";
 const BASE_URL = "https://mailpocket.shop";
+const MAX_TRANSLATE_SOURCE_LENGTH = 5500;
 
 const OPENAI_PROMPT = `
 # 요약
@@ -35,6 +36,36 @@ const OPENAI_PROMPT = `
 - 답변을 JSON 형식으로 정리하여 제출해야 합니다. 이때, 각 주제목을 Key로, 내용을 Value로 해야합니다.
 - JSON 답변시 "중첩된(nested) JSON" 혹은 "계층적(hierarchical) JSON" 구조를 절대로 사용하지 마세요.
 - "주제", "내용" 등 단순한 주제목을 절대로 사용하지마세요.
+`;
+
+const OPENAI_PROMPT_FOR_ENGLISH = `
+# Summary and Translation
+- You are a journalist and announcer who summarizes long news articles and delivers them to people. Summarize the key content of the news articles provided. The summary should include the main events, their impact and results, and their long-term importance.
+- The subject title should be a one-line summary of the news.
+- The content should consist of 3 sentences per article, clearly divided into introduction, body, and conclusion. Each content should only cover topics relevant to the article.
+- Use present tense and use descriptive and objective expressions rather than direct speech.
+- Translate the summary into natural Korean. The translation should maintain the original meaning without exaggeration or distortion.
+- Use formal and complete sentence endings in Korean (e.g., "논란이 있습니다" instead of "논란이 있다").
+- Within individual sentences, convey facts while maintaining appropriate courtesy and clearly indicate that the purpose is to provide information to readers.
+
+# Output
+- You must organize your answer in JSON format. Each subject title should be the Key and the content should be the Value.
+- Never use "nested JSON" or "hierarchical JSON" structures in JSON responses.
+- Never use simple subject titles like "주제" or "내용".
+- All output must be in Korean.
+`;
+
+const TRANSLATE_SYSTEM_PROMPT = `
+당신은 해외 뉴스레터를 한국어로 번역하는 전문가입니다.
+
+규칙:
+- 반드시 한국어로 번역합니다.
+- 원문의 의미를 훼손하거나 과장하지 않습니다.
+- 직역이 아닌 자연스러운 한국어 번역을 합니다.
+- 뉴스레터 문체를 유지합니다.
+- 불필요한 서론, 요약, 결론을 추가하지 않습니다.
+- HTML 태그를 생성하지 말고 순수 텍스트로만 출력합니다.
+- 문단 구분은 줄바꿈으로 자연스럽게 유지합니다.
 `;
 
 // Initialize clients
@@ -65,6 +96,7 @@ interface NewsletterData {
   newsletter_id: number;
   newsletter: {
     name: string;
+    language?: string | null;
   };
 }
 
@@ -73,6 +105,7 @@ interface MailData {
   s3_object_key: string;
   subject: string;
   summary_list: Record<string, string>;
+  translated_body?: string | null;
 }
 
 interface ChannelData {
@@ -138,6 +171,21 @@ function extractHtmlText(html: string): string {
   return text.trim().replace(/\n/g, "");
 }
 
+function extractTranslatableText(html: string): string {
+  const $ = cheerio.load(html);
+  $("script, style, head").remove();
+  const text = $("body").text();
+  const normalized = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\s*\n\s*/g, "\n")
+    .trim();
+
+  return normalized.slice(0, MAX_TRANSLATE_SOURCE_LENGTH);
+}
+
 function cleanJsonContent(content: string): string {
   if (content.includes("```json")) {
     const jsonPart = content.split("```json")[1].split("```")[0];
@@ -158,8 +206,12 @@ function validateSummary(summaryList: Record<string, string>): void {
   }
 }
 
-async function generateSummary(html: string): Promise<Record<string, string>> {
+async function generateSummary(html: string, language: string = "ko"): Promise<Record<string, string>> {
   const htmlText = extractHtmlText(html);
+  const prompt = language === "en" ? OPENAI_PROMPT_FOR_ENGLISH : OPENAI_PROMPT;
+  const userContent = language === "en"
+    ? `News article to summarize and translate to Korean:\n\n${htmlText}`
+    : `뉴스:${htmlText}`;
 
   for (let attempt = 0; attempt < MAX_SUMMARY_RETRIES; attempt++) {
     try {
@@ -167,8 +219,8 @@ async function generateSummary(html: string): Promise<Record<string, string>> {
         model: OPENAI_MODEL,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: OPENAI_PROMPT },
-          { role: "user", content: `뉴스:${htmlText}` },
+          { role: "system", content: prompt },
+          { role: "user", content: userContent },
         ],
         temperature: 0,
       });
@@ -188,6 +240,27 @@ async function generateSummary(html: string): Promise<Record<string, string>> {
   }
 
   return { "요약을 실패했습니다.": "본문을 확인해주세요." };
+}
+
+async function translateToKorean(text: string): Promise<string | null> {
+  if (!text) return null;
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: "system", content: TRANSLATE_SYSTEM_PROMPT },
+        { role: "user", content: text },
+      ],
+      temperature: 0,
+    });
+
+    const translated = response.choices[0].message.content?.trim() || null;
+    return translated || null;
+  } catch (error) {
+    console.error("Translation failed:", error);
+    return null;
+  }
 }
 
 async function sendSlackMessage(webhookUrl: string, blocks: any[]): Promise<void> {
@@ -243,20 +316,283 @@ async function logUnknownEmailToSlack(
   ]);
 }
 
-async function findNewsletterByEmail(
-  emailAddress: string
-): Promise<NewsletterData | null> {
-  const { data, error } = await supabase
-    .from("newsletter_email_addresses")
-    .select("newsletter_id, newsletter:newsletter_id(*)")
-    .eq("email_address", emailAddress)
-    .single();
+// ============================================================
+// Newsletter Matching Strategy - 4-Step Resolution
+// ============================================================
+// 0. From header name matching (highest priority)
+// 1. HTML body text-based name matching
+// 2. Email address exact matching
+// 3. Domain matching (excluding blacklist, single match only)
+// ============================================================
 
-  if (error || !data) {
-    return null;
+// Domain blacklist for step 3 - these domains should never match
+const DOMAIN_BLACKLIST = [
+  "gmail.com",
+  "naver.com",
+  "daum.net",
+  "kakao.com",
+  "outlook.com",
+  "hotmail.com",
+  "yahoo.com",
+  "stibee.com",
+  "send.stibee.com",
+  "mailchimp.com",
+  "sendgrid.net",
+  "substack.com",
+];
+
+const MAX_HTML_TEXT_LENGTH = 10000;
+
+interface NewsletterMatchResult {
+  newsletter: { id: number; name: string } | null;
+  matchedBy: "from_name" | "html_body" | "email" | "domain" | null;
+}
+
+interface NewsletterInfo {
+  id: number;
+  name: string;
+  language: string | null;
+}
+
+interface NewsletterEmailInfo {
+  newsletter_id: number;
+  email_address: string;
+}
+
+/**
+ * Normalize text for matching: lowercase, remove spaces and special characters
+ * This ensures consistent matching regardless of formatting differences
+ */
+function normalize(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\s+/g, "") // Remove all whitespace
+    .replace(/[^\w가-힣]/g, ""); // Remove special characters, keep alphanumeric and Korean
+}
+
+/**
+ * Extract clean text from HTML body for name matching
+ * Removes script, style, and head tags to get only content text
+ * Limits text length to MAX_HTML_TEXT_LENGTH for performance
+ */
+function extractTextForNameMatching(html: string): string {
+  const $ = cheerio.load(html);
+  $("script, style, head").remove();
+  const text = $("body").text();
+  const normalized = normalize(text);
+  return normalized.slice(0, MAX_HTML_TEXT_LENGTH);
+}
+
+/**
+ * Step 0: Match newsletter by From header name
+ * This is the highest priority method because From name is the most reliable
+ * identifier when email addresses change
+ */
+function matchNewsletterByFromName(
+  parsedFromName: string,
+  newsletters: NewsletterInfo[]
+): { newsletter: { id: number; name: string } | null; matchedBy: "from_name" | null } {
+  const normalizedFromName = normalize(parsedFromName);
+
+  for (const newsletter of newsletters) {
+    const normalizedName = normalize(newsletter.name);
+    
+    // Check if newsletter name is included in From name
+    if (normalizedFromName.includes(normalizedName)) {
+      console.log(`[MATCH] from_name success: ${newsletter.name}`);
+      return {
+        newsletter: { id: newsletter.id, name: newsletter.name },
+        matchedBy: "from_name",
+      };
+    }
   }
 
-  return data as NewsletterData;
+  console.log("[MATCH] from_name failed");
+  return { newsletter: null, matchedBy: null };
+}
+
+/**
+ * Step 1: Match newsletter by name in HTML body
+ * This handles cases where From name doesn't match but newsletter name appears in content
+ */
+function matchNewsletterByHtmlBody(
+  htmlBody: string,
+  newsletters: NewsletterInfo[]
+): { newsletter: { id: number; name: string } | null; matchedBy: "html_body" | null } {
+  const htmlText = extractTextForNameMatching(htmlBody);
+
+  for (const newsletter of newsletters) {
+    const normalizedName = normalize(newsletter.name);
+    
+    // Check if newsletter name appears in HTML body
+    if (htmlText.includes(normalizedName)) {
+      console.log(`[MATCH] html_body success: ${newsletter.name}`);
+      return {
+        newsletter: { id: newsletter.id, name: newsletter.name },
+        matchedBy: "html_body",
+      };
+    }
+  }
+
+  console.log("[MATCH] html_body failed");
+  return { newsletter: null, matchedBy: null };
+}
+
+/**
+ * Step 2: Match newsletter by exact email address
+ * Uses newsletter_email_addresses table
+ * Only matches when email addresses are exactly the same
+ */
+function matchNewsletterByEmail(
+  parsedFromEmail: string,
+  newsletterEmailAddresses: NewsletterEmailInfo[],
+  newsletters: NewsletterInfo[]
+): { newsletter: { id: number; name: string } | null; matchedBy: "email" | null } {
+  for (const emailInfo of newsletterEmailAddresses) {
+    if (emailInfo.email_address === parsedFromEmail) {
+      const newsletter = newsletters.find((n) => n.id === emailInfo.newsletter_id);
+      if (newsletter) {
+        console.log(`[MATCH] email success: ${newsletter.name}`);
+        return {
+          newsletter: { id: newsletter.id, name: newsletter.name },
+          matchedBy: "email",
+        };
+      }
+    }
+  }
+
+  console.log("[MATCH] email failed");
+  return { newsletter: null, matchedBy: null };
+}
+
+/**
+ * Extract domain from email address
+ */
+function extractDomain(email: string): string | null {
+  const match = email.match(/@([^@]+)$/);
+  return match ? match[1].toLowerCase() : null;
+}
+
+/**
+ * Step 3: Match newsletter by domain (excluding blacklist)
+ * This handles cases where email addresses change but domain stays the same
+ * Only matches when exactly one newsletter has the same domain
+ * Blacklist prevents matching generic email providers
+ */
+function matchNewsletterByDomain(
+  parsedFromEmail: string,
+  newsletterEmailAddresses: NewsletterEmailInfo[],
+  newsletters: NewsletterInfo[]
+): { newsletter: { id: number; name: string } | null; matchedBy: "domain" | null } {
+  const domain = extractDomain(parsedFromEmail);
+  
+  if (!domain) {
+    console.log("[MATCH] domain failed: no domain");
+    return { newsletter: null, matchedBy: null };
+  }
+
+  // Check blacklist - if domain is in blacklist, skip this step
+  if (DOMAIN_BLACKLIST.includes(domain)) {
+    console.log(`[MATCH] domain failed: ${domain} is in blacklist`);
+    return { newsletter: null, matchedBy: null };
+  }
+
+  // Find all newsletters with matching domain from newsletter_email_addresses
+  const matchingNewsletterIds = new Set<number>();
+  
+  for (const emailInfo of newsletterEmailAddresses) {
+    const emailDomain = extractDomain(emailInfo.email_address);
+    if (emailDomain && emailDomain === domain) {
+      matchingNewsletterIds.add(emailInfo.newsletter_id);
+    }
+  }
+
+  // Only match if exactly one newsletter has this domain
+  if (matchingNewsletterIds.size === 1) {
+    const newsletterId = Array.from(matchingNewsletterIds)[0];
+    const newsletter = newsletters.find((n) => n.id === newsletterId);
+    if (newsletter) {
+      console.log(`[MATCH] domain success: ${newsletter.name}`);
+      return {
+        newsletter: { id: newsletter.id, name: newsletter.name },
+        matchedBy: "domain",
+      };
+    }
+  }
+
+  if (matchingNewsletterIds.size > 1) {
+    console.log(`[MATCH] domain failed: multiple newsletters found (${matchingNewsletterIds.size})`);
+  } else {
+    console.log("[MATCH] domain failed: no matching domain");
+  }
+  
+  return { newsletter: null, matchedBy: null };
+}
+
+/**
+ * Main newsletter resolution function
+ * Tries 4-step matching strategy in order:
+ * 0. From header name matching (highest priority)
+ * 1. HTML body name matching
+ * 2. Email address exact matching
+ * 3. Domain matching (last resort, blacklist excluded, single match only)
+ * 
+ * Returns match result with newsletter info and matchedBy method
+ */
+async function resolveNewsletter(
+  parsedFromName: string,
+  parsedFromEmail: string,
+  htmlBody: string
+): Promise<NewsletterMatchResult> {
+  // Load all newsletters and email addresses once
+  const { data: newsletters, error: newslettersError } = await supabase
+    .from("newsletter")
+    .select("id, name, language");
+
+  if (newslettersError || !newsletters || newsletters.length === 0) {
+    console.log("[MATCH] Failed to load newsletters");
+    return { newsletter: null, matchedBy: null };
+  }
+
+  const { data: newsletterEmailAddresses, error: emailsError } = await supabase
+    .from("newsletter_email_addresses")
+    .select("newsletter_id, email_address");
+
+  if (emailsError) {
+    console.log("[MATCH] Failed to load newsletter email addresses");
+    return { newsletter: null, matchedBy: null };
+  }
+
+  const newsletterList: NewsletterInfo[] = newsletters;
+  const emailList: NewsletterEmailInfo[] = newsletterEmailAddresses || [];
+
+  // Step 0: Try From header name matching (highest priority)
+  const fromNameMatch = matchNewsletterByFromName(parsedFromName, newsletterList);
+  if (fromNameMatch.newsletter) {
+    return fromNameMatch;
+  }
+
+  // Step 1: Try HTML body name matching
+  const htmlBodyMatch = matchNewsletterByHtmlBody(htmlBody, newsletterList);
+  if (htmlBodyMatch.newsletter) {
+    return htmlBodyMatch;
+  }
+
+  // Step 2: Try email address exact matching
+  const emailMatch = matchNewsletterByEmail(parsedFromEmail, emailList, newsletterList);
+  if (emailMatch.newsletter) {
+    return emailMatch;
+  }
+
+  // Step 3: Try domain matching (excluding blacklist, single match only)
+  const domainMatch = matchNewsletterByDomain(parsedFromEmail, emailList, newsletterList);
+  if (domainMatch.newsletter) {
+    return domainMatch;
+  }
+
+  // All matching strategies failed
+  console.log("[MATCH] All matching strategies failed");
+  return { newsletter: null, matchedBy: null };
 }
 
 async function saveMail(
@@ -264,7 +600,8 @@ async function saveMail(
   subject: string,
   summaryList: Record<string, string>,
   newsletterId: number,
-  htmlBody: string
+  htmlBody: string,
+  translatedBody: string | null
 ): Promise<MailData> {
   const { data, error } = await supabase
       .from("mail")
@@ -274,6 +611,7 @@ async function saveMail(
         summary_list: summaryList,
         newsletter_id: newsletterId,
         html_body: htmlBody,
+        translated_body: translatedBody,
         recv_at: new Date().toISOString(),
       })
       .select()
@@ -432,9 +770,19 @@ serve(async (req) => {
       s3_object_key
     );
 
-    // Find newsletter by email address
-    const newsletter = await findNewsletterByEmail(parsedEmail.fromEmailAddress);
-    if (!newsletter) {
+    // Resolve newsletter using 4-step matching strategy
+    // 0. From header name matching (highest priority)
+    // 1. HTML body name matching
+    // 2. Email address exact matching
+    // 3. Domain matching (last resort, blacklist excluded, single match only)
+    const matchResult = await resolveNewsletter(
+      parsedEmail.fromName,
+      parsedEmail.fromEmailAddress,
+      parsedEmail.htmlBody
+    );
+    
+    if (!matchResult.newsletter) {
+      // All matching strategies failed - log to Slack but don't save to DB
       await logUnknownEmailToSlack(
         parsedEmail.fromEmailAddress,
         parsedEmail.fromName,
@@ -442,28 +790,57 @@ serve(async (req) => {
         s3_object_key
       );
       return createErrorResponse(
-        `Unknown from email: ${parsedEmail.fromEmailAddress}`,
+        "Unable to resolve newsletter (name/email/domain match failed)",
         400
       );
     }
 
+    // Get full newsletter data including language
+    const { data: newsletterData, error: newsletterError } = await supabase
+      .from("newsletter")
+      .select("id, name, language")
+      .eq("id", matchResult.newsletter.id)
+      .single();
+
+    if (newsletterError || !newsletterData) {
+      return createErrorResponse("Failed to load newsletter data", 500);
+    }
+
+    const newsletterLanguage = newsletterData.language || "ko";
+
     // Generate summary using OpenAI
-    const summaryList = await generateSummary(parsedEmail.htmlBody);
+    // For English newsletters, the summary will be automatically translated to Korean
+    const summaryList = await generateSummary(parsedEmail.htmlBody, newsletterLanguage);
+
+    // Translate only for English newsletters
+    let translatedBody: string | null = null;
+    if (newsletterLanguage === "en") {
+      const translationSource = extractTranslatableText(parsedEmail.htmlBody);
+      translatedBody = await translateToKorean(translationSource);
+    }
 
     // Save mail to database (including html_body for faster retrieval)
     const mail = await saveMail(
       s3_object_key,
       parsedEmail.subject,
       summaryList,
-      newsletter.newsletter_id,
-      parsedEmail.htmlBody
+      matchResult.newsletter.id,
+      parsedEmail.htmlBody,
+      translatedBody
     );
 
     // Update newsletter last_recv_at
-    await updateNewsletterLastRecvAt(newsletter.newsletter_id);
+    await updateNewsletterLastRecvAt(matchResult.newsletter.id);
 
     // Send Slack notifications to subscribed channels
-    await sendSlackNotifications(mail, newsletter);
+    const newsletterForNotification: NewsletterData = {
+      newsletter_id: matchResult.newsletter.id,
+      newsletter: {
+        name: matchResult.newsletter.name,
+        language: newsletterLanguage,
+      },
+    };
+    await sendSlackNotifications(mail, newsletterForNotification);
 
     return new Response(
       JSON.stringify({

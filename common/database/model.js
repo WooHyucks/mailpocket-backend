@@ -13,7 +13,7 @@ export const ChannelModel = {
 
 export const NewsLetterModel = {
   tableName: 'newsletter',
-  fields: ['id', 'name', 'from_email', 'send_date', 'last_recv_at', 'operating_status', 'category_id']
+  fields: ['id', 'name', 'from_email', 'send_date', 'last_recv_at', 'operating_status', 'category_id', 'language']
 };
 
 export const NewsletterEmailAddressesModel = {
@@ -33,7 +33,7 @@ export const SubscribeRankingModel = {
 
 export const MailModel = {
   tableName: 'mail',
-  fields: ['id', 's3_object_key', 'subject', 'summary_list', 'newsletter_id', 'recv_at']
+  fields: ['id', 's3_object_key', 'subject', 'summary_list', 'newsletter_id', 'recv_at', 'html_body', 'translated_body']
 };
 
 export const CategoryModel = {

@@ -4,6 +4,7 @@ import { SlackAPI } from '../common/slack_api.js';
 import { MailRepository } from './repository.js';
 import { NewsLetterRepository } from '../newsletter/repository.js';
 import { UserRepository } from '../user/repository.js';
+import { mailTranslateToKorean } from '../common/gpt_prompt.js';
 
 export class MailService {
   constructor() {
@@ -19,14 +20,34 @@ export class MailService {
     await mail.parserEmail();
     await this.slackApi.loging(mail);
     
-    const newsletter = await new this.newsletterRepository.LoadNewsLetterByFromEmail(mail.from_email).run();
+    // Resolve newsletter using 4-step matching strategy
+    // 0. From header name matching (highest priority)
+    // 1. HTML body name matching
+    // 2. Email address exact matching
+    // 3. Domain matching (last resort, blacklist excluded, single match only)
+    const matchResult = await new this.newsletterRepository.ResolveNewsletter(mail.from_name, mail.from_email, mail.html_body).run();
+    if (!matchResult || !matchResult.newsletter) {
+      await this.slackApi.logingUnknownEmailAddress(mail);
+      throw new UnknownFromEamilException('Unable to resolve newsletter (name/email/domain match failed)');
+    }
+    
+    // Get full newsletter data including language
+    const newsletter = await new this.newsletterRepository.LoadNewsLetterByID(matchResult.newsletter.id).run();
     if (!newsletter) {
       await this.slackApi.logingUnknownEmailAddress(mail);
-      throw new UnknownFromEamilException(mail.from_email);
+      throw new UnknownFromEamilException('Failed to load newsletter data');
     }
+    
     mail.setNewsletterId(newsletter.id);
 
-    await mail.summary();
+    await mail.summary(newsletter.language || 'ko');
+
+    if (newsletter.language === 'en') {
+      mail.translated_body = await mailTranslateToKorean(mail.html_body);
+    } else {
+      mail.translated_body = null;
+    }
+
     await new MailRepository.CreateMail(mail).run();
     await new this.newsletterRepository.UpdateNewsletterLastRecvDateTime(newsletter).run();
 

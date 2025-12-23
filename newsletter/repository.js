@@ -9,6 +9,7 @@ import {
 } from '../common/database/model.js';
 import { NewsLetter, Category } from './domain.js';
 import { Mail } from '../mail/domain.js';
+import * as cheerio from 'cheerio';
 
 export class NewsLetterRepository {
   static LoadNewsLetterByFromEmail = class extends SupabaseCRUDTemplate {
@@ -47,7 +48,35 @@ export class NewsLetterRepository {
         id: data.id,
         name: data.name,
         category_id: data.category_id,
-        send_date: data.send_date
+        send_date: data.send_date,
+        language: data.language
+      });
+    }
+  };
+
+  static LoadNewsLetterByID = class extends SupabaseCRUDTemplate {
+    constructor(id) {
+      super();
+      this.id = id;
+    }
+
+    async execute() {
+      const { data: newsletterData, error: newsletterError } = await this.client
+        .from(NewsLetterModel.tableName)
+        .select('*')
+        .eq('id', this.id)
+        .single();
+      
+      if (newsletterError || !newsletterData) {
+        return null;
+      }
+      
+      return new NewsLetter({
+        id: newsletterData.id,
+        name: newsletterData.name,
+        category_id: newsletterData.category_id,
+        send_date: newsletterData.send_date,
+        language: newsletterData.language || 'ko'
       });
     }
   };
@@ -89,6 +118,7 @@ export class NewsLetterRepository {
         name: newsletterData.name,
         category_id: newsletterData.category_id,
         send_date: newsletterData.send_date,
+        language: newsletterData.language,
         mails: mailList
       });
     }
@@ -107,7 +137,8 @@ export class NewsLetterRepository {
           name: newsletterModel.name,
           category_id: newsletterModel.category_id,
           send_date: newsletterModel.send_date,
-          operating_status: newsletterModel.operating_status
+          operating_status: newsletterModel.operating_status,
+          language: newsletterModel.language
         }));
     }
   };
@@ -237,6 +268,7 @@ export class NewsLetterRepository {
           name: newsletterModel.name,
           category_id: newsletterModel.category_id,
           send_date: newsletterModel.send_date,
+          language: newsletterModel.language,
           mail: mail
         }));
       }
@@ -327,6 +359,248 @@ export class NewsLetterRepository {
       if (error) throw error;
       
       return (rows || []).map(categoryModel => new Category(categoryModel.id, categoryModel.name));
+    }
+  };
+
+  // ============================================================
+  // Newsletter Matching Strategy - 4-Step Resolution
+  // ============================================================
+  // 0. From header name matching (highest priority)
+  // 1. HTML body text-based name matching
+  // 2. Email address exact matching
+  // 3. Domain matching (excluding blacklist, single match only)
+  // ============================================================
+
+  static DOMAIN_BLACKLIST = [
+    'gmail.com',
+    'naver.com',
+    'daum.net',
+    'kakao.com',
+    'outlook.com',
+    'hotmail.com',
+    'yahoo.com',
+    'stibee.com',
+    'send.stibee.com',
+    'mailchimp.com',
+    'sendgrid.net',
+    'substack.com'
+  ];
+
+  static MAX_HTML_TEXT_LENGTH = 10000;
+
+  static normalize(text) {
+    return text
+      .toLowerCase()
+      .replace(/\s+/g, '') // Remove all whitespace
+      .replace(/[^\w가-힣]/g, ''); // Remove special characters, keep alphanumeric and Korean
+  }
+
+  static extractTextForNameMatching(html) {
+    const $ = cheerio.load(html);
+    $('script, style, head').remove();
+    const text = $('body').text();
+    const normalized = NewsLetterRepository.normalize(text);
+    return normalized.slice(0, NewsLetterRepository.MAX_HTML_TEXT_LENGTH);
+  }
+
+  static extractDomain(email) {
+    const match = email.match(/@([^@]+)$/);
+    return match ? match[1].toLowerCase() : null;
+  }
+
+  static MatchNewsletterByFromName = class extends SupabaseCRUDTemplate {
+    constructor(parsedFromName, newsletters) {
+      super();
+      this.parsedFromName = parsedFromName;
+      this.newsletters = newsletters;
+    }
+
+    execute() {
+      const normalizedFromName = NewsLetterRepository.normalize(this.parsedFromName);
+
+      for (const newsletter of this.newsletters) {
+        const normalizedName = NewsLetterRepository.normalize(newsletter.name);
+        
+        if (normalizedFromName.includes(normalizedName)) {
+          console.log(`[MATCH] from_name success: ${newsletter.name}`);
+          return {
+            newsletter: { id: newsletter.id, name: newsletter.name },
+            matchedBy: 'from_name'
+          };
+        }
+      }
+
+      console.log('[MATCH] from_name failed');
+      return { newsletter: null, matchedBy: null };
+    }
+  };
+
+  static MatchNewsletterByHtmlBody = class extends SupabaseCRUDTemplate {
+    constructor(htmlBody, newsletters) {
+      super();
+      this.htmlBody = htmlBody;
+      this.newsletters = newsletters;
+    }
+
+    execute() {
+      const htmlText = NewsLetterRepository.extractTextForNameMatching(this.htmlBody);
+
+      for (const newsletter of this.newsletters) {
+        const normalizedName = NewsLetterRepository.normalize(newsletter.name);
+        
+        if (htmlText.includes(normalizedName)) {
+          console.log(`[MATCH] html_body success: ${newsletter.name}`);
+          return {
+            newsletter: { id: newsletter.id, name: newsletter.name },
+            matchedBy: 'html_body'
+          };
+        }
+      }
+
+      console.log('[MATCH] html_body failed');
+      return { newsletter: null, matchedBy: null };
+    }
+  };
+
+  static MatchNewsletterByEmail = class extends SupabaseCRUDTemplate {
+    constructor(parsedFromEmail, newsletterEmailAddresses, newsletters) {
+      super();
+      this.parsedFromEmail = parsedFromEmail;
+      this.newsletterEmailAddresses = newsletterEmailAddresses;
+      this.newsletters = newsletters;
+    }
+
+    execute() {
+      for (const emailInfo of this.newsletterEmailAddresses) {
+        if (emailInfo.email_address === this.parsedFromEmail) {
+          const newsletter = this.newsletters.find(n => n.id === emailInfo.newsletter_id);
+          if (newsletter) {
+            console.log(`[MATCH] email success: ${newsletter.name}`);
+            return {
+              newsletter: { id: newsletter.id, name: newsletter.name },
+              matchedBy: 'email'
+            };
+          }
+        }
+      }
+
+      console.log('[MATCH] email failed');
+      return { newsletter: null, matchedBy: null };
+    }
+  };
+
+  static MatchNewsletterByDomain = class extends SupabaseCRUDTemplate {
+    constructor(parsedFromEmail, newsletterEmailAddresses, newsletters) {
+      super();
+      this.parsedFromEmail = parsedFromEmail;
+      this.newsletterEmailAddresses = newsletterEmailAddresses;
+      this.newsletters = newsletters;
+    }
+
+    execute() {
+      const domain = NewsLetterRepository.extractDomain(this.parsedFromEmail);
+      
+      if (!domain) {
+        console.log('[MATCH] domain failed: no domain');
+        return { newsletter: null, matchedBy: null };
+      }
+
+      if (NewsLetterRepository.DOMAIN_BLACKLIST.includes(domain)) {
+        console.log(`[MATCH] domain failed: ${domain} is in blacklist`);
+        return { newsletter: null, matchedBy: null };
+      }
+
+      // Find all newsletters with matching domain from newsletter_email_addresses
+      const matchingNewsletterIds = new Set();
+      
+      for (const emailInfo of this.newsletterEmailAddresses) {
+        const emailDomain = NewsLetterRepository.extractDomain(emailInfo.email_address);
+        if (emailDomain && emailDomain === domain) {
+          matchingNewsletterIds.add(emailInfo.newsletter_id);
+        }
+      }
+
+      // Only match if exactly one newsletter has this domain
+      if (matchingNewsletterIds.size === 1) {
+        const newsletterId = Array.from(matchingNewsletterIds)[0];
+        const newsletter = this.newsletters.find(n => n.id === newsletterId);
+        if (newsletter) {
+          console.log(`[MATCH] domain success: ${newsletter.name}`);
+          return {
+            newsletter: { id: newsletter.id, name: newsletter.name },
+            matchedBy: 'domain'
+          };
+        }
+      }
+
+      if (matchingNewsletterIds.size > 1) {
+        console.log(`[MATCH] domain failed: multiple newsletters found (${matchingNewsletterIds.size})`);
+      } else {
+        console.log('[MATCH] domain failed: no matching domain');
+      }
+      
+      return { newsletter: null, matchedBy: null };
+    }
+  };
+
+  static ResolveNewsletter = class extends SupabaseCRUDTemplate {
+    constructor(parsedFromName, parsedFromEmail, htmlBody) {
+      super();
+      this.parsedFromName = parsedFromName;
+      this.parsedFromEmail = parsedFromEmail;
+      this.htmlBody = htmlBody;
+    }
+
+    async execute() {
+      // Load all newsletters and email addresses once
+      const { data: newsletters, error: newslettersError } = await this.client
+        .from(NewsLetterModel.tableName)
+        .select('id, name, language');
+
+      if (newslettersError || !newsletters || newsletters.length === 0) {
+        console.log('[MATCH] Failed to load newsletters');
+        return { newsletter: null, matchedBy: null };
+      }
+
+      const { data: newsletterEmailAddresses, error: emailsError } = await this.client
+        .from(NewsletterEmailAddressesModel.tableName)
+        .select('newsletter_id, email_address');
+
+      if (emailsError) {
+        console.log('[MATCH] Failed to load newsletter email addresses');
+        return { newsletter: null, matchedBy: null };
+      }
+
+      const newsletterList = newsletters;
+      const emailList = newsletterEmailAddresses || [];
+
+      // Step 0: Try From header name matching (highest priority)
+      const fromNameMatch = new NewsLetterRepository.MatchNewsletterByFromName(this.parsedFromName, newsletterList).execute();
+      if (fromNameMatch.newsletter) {
+        return fromNameMatch;
+      }
+
+      // Step 1: Try HTML body name matching
+      const htmlBodyMatch = new NewsLetterRepository.MatchNewsletterByHtmlBody(this.htmlBody, newsletterList).execute();
+      if (htmlBodyMatch.newsletter) {
+        return htmlBodyMatch;
+      }
+
+      // Step 2: Try email address exact matching
+      const emailMatch = new NewsLetterRepository.MatchNewsletterByEmail(this.parsedFromEmail, emailList, newsletterList).execute();
+      if (emailMatch.newsletter) {
+        return emailMatch;
+      }
+
+      // Step 3: Try domain matching (excluding blacklist, single match only)
+      const domainMatch = new NewsLetterRepository.MatchNewsletterByDomain(this.parsedFromEmail, emailList, newsletterList).execute();
+      if (domainMatch.newsletter) {
+        return domainMatch;
+      }
+
+      // All matching strategies failed
+      console.log('[MATCH] All matching strategies failed');
+      return { newsletter: null, matchedBy: null };
     }
   };
 }
